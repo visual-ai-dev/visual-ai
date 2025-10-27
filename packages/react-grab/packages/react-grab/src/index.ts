@@ -29,6 +29,21 @@ import { createStore } from "./utils/store.js";
 export { cursorAdapter } from "./adapters.js";
 export type { Adapter } from "./adapters.js";
 
+export interface ReactGrabResult {
+  type: "react-grab-result";
+  data: {
+    tagName: string;
+    serializedStack?: string;
+    htmlSnippet: string;
+    rect: {
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+    };
+  };
+}
+
 export interface Options {
   /**
    * adapter to open the prompt in an external tool
@@ -307,11 +322,23 @@ export const init = (options: Options = {}) => {
     });
   };
 
+  const handleMessage = (event: MessageEvent) => {
+    const { data } = event;
+    if (data?.type === "react-grab" && data?.action === "toggle") {
+      const { overlayMode } = libStore.getState();
+      libStore.setState((state) => ({
+        ...state,
+        overlayMode: overlayMode === "hidden" ? "visible" : "hidden",
+      }));
+    }
+  };
+
   window.addEventListener("mousemove", handleMouseMove);
   window.addEventListener("mousedown", handleMouseDown, true);
   window.addEventListener("click", handleClick, true);
   window.addEventListener("scroll", handleScroll, true);
   window.addEventListener("resize", handleResize);
+  window.addEventListener("message", handleMessage);
   document.addEventListener("visibilitychange", handleVisibilityChange);
   const cleanupTrackHotkeys = trackHotkeys();
 
@@ -347,12 +374,13 @@ export const init = (options: Options = {}) => {
       );
 
       const stack = await getStack(element);
+      let serializedStack: string | undefined;
 
       if (stack) {
         const filteredStack = filterStack(stack);
 
         if (filteredStack.length > 0) {
-          const serializedStack = serializeStack(filteredStack);
+          serializedStack = serializeStack(filteredStack);
           const fullText = `${htmlSnippet}\n\nComponent owner stack:\n${serializedStack}`;
 
           await copyTextToClipboard(
@@ -367,6 +395,32 @@ export const init = (options: Options = {}) => {
         }
       } else if (resolvedOptions.adapter) {
         resolvedOptions.adapter.open(htmlSnippet);
+      }
+
+      // Send message to parent window (e.g., Claude Code shell)
+      const message: ReactGrabResult = {
+        type: "react-grab-result",
+        data: {
+          tagName,
+          htmlSnippet,
+          rect: {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+          },
+          ...(serializedStack && { serializedStack }),
+        },
+      };
+
+      // Send to parent window if in iframe
+      if (window.parent !== window) {
+        window.parent.postMessage(message, "*");
+      }
+
+      // Send to opener window if opened via window.open()
+      if (window.opener) {
+        window.opener.postMessage(message, "*");
       }
 
       cleanupIndicator(tagName);
@@ -510,6 +564,7 @@ export const init = (options: Options = {}) => {
     window.removeEventListener("click", handleClick, true);
     window.removeEventListener("scroll", handleScroll, true);
     window.removeEventListener("resize", handleResize);
+    window.removeEventListener("message", handleMessage);
     document.removeEventListener("visibilitychange", handleVisibilityChange);
     cleanupTrackHotkeys();
     cleanupRenderSubscription();
